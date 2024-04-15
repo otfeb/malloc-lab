@@ -56,6 +56,8 @@ team_t team = {
 #define MAX(x, y) (x > y ? x : y)
 /* 크기와 할당 비트를 통합해서 헤더와 풋터에 저장할 수 있는 값을 반환 */
 #define PACK(size, alloc) (size | alloc)
+/* [최적화 방법 1] 이전 블록이 할당되었는지 아닌지에 대한 정보를 최하위 다음 비트에 저장 */
+// #define REPACK(size, prealloc) (size | prealloc)
 /* 인자 p가 참조하는 워드를 읽어서 반환 (포인터라서 직접 역참조 불가 -> 타입 변환) */
 #define GET(p) (*(unsigned int *)(p))
 /* 인자 p가 가리키는 워드에 val을 저장 */
@@ -79,6 +81,8 @@ static void *coalaesce(void *bp);
 static void *find_fit(size_t size);
 static void place(void *bp, size_t asize);
 
+static void *heap_currp;
+
 int mm_init(void)
 {
     /* 힙 초기화 , 4 word 크기 할당 , 할당 실패시 -1 반환 */
@@ -96,6 +100,7 @@ int mm_init(void)
     PUT(heap_listp + (3 * WSIZE), PACK(0, 1));
     /* 현재 포인터 위치 두 블록 지나서 설정 */
     heap_listp += (2 * WSIZE);
+    heap_currp = heap_listp;
 
     /* 힙을 CHUNKSIZE 바이트로 확장 (4KB) */
     if (extend_heap(CHUNKSIZE / WSIZE) == NULL)
@@ -152,12 +157,12 @@ static void *coalaesce(void *bp){
     /* Case 4. 인전 블록이 모두 가용일 때 */
     else{
         /* 현재 블록의 사이즈와 두 인접 블록의 사이즈의 합 */
-        /* 왜 다음 블록의 풋터????? 헤더는 왜 안됨????????????????? */
-        size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(FTRP(NEXT_BLKP(bp)));
+        size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(HDRP(NEXT_BLKP(bp)));
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
         PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
         bp = PREV_BLKP(bp);
     }
+    heap_currp = bp;
     return bp;
 }
 
@@ -205,11 +210,20 @@ static void *find_fit(size_t size){
     /* first fit 검색이므로 힙의 처음부터 가용 블록을 찾으며 인자값인 size보다 크거나 같은 가용 블록을 찾으면 그 가용 블록 bp주소를 반환 */
     void *bp;
     /* 힙의 맨 처음에서 8 byte 이후부터 검색 시작 */
-    bp = mem_heap_lo() + (2 * WSIZE);
+    bp = heap_currp;
 
     while(GET_SIZE(HDRP(bp)) > 0){
-        if(!GET_ALLOC(HDRP(bp)) && (size <= GET_SIZE(HDRP(bp))))
+        if(!GET_ALLOC(HDRP(bp)) && (size <= GET_SIZE(HDRP(bp)))){
+            heap_currp = bp;
             return bp;
+        }
+        bp = NEXT_BLKP(bp);
+    }
+    bp = mem_heap_lo() + (2 * WSIZE);
+    while(bp < heap_currp){
+        if(!GET_ALLOC(HDRP(bp)) && (size <= GET_SIZE(HDRP(bp)))){
+            return bp;
+        }
         bp = NEXT_BLKP(bp);
     }
     return NULL;
@@ -245,32 +259,27 @@ void mm_free(void *bp)
 void *mm_realloc(void *ptr, size_t size)
 {
 
-    /* 예외 처리 */
-    if (ptr == NULL) // 포인터가 NULL인 경우 할당만 수행
+    if(ptr == NULL)         // 포인터가 null인 경우 할당만 수행
         return mm_malloc(size);
-
-    if (size <= 0) // size가 0인 경우 메모리 반환만 수행
-    {
+    if(size == 0){           // size가 0인 경우 블록 반환만 수행
         mm_free(ptr);
         return 0;
     }
 
-    /* 새 블록에 할당 */
-    void *newptr = mm_malloc(size); // 새로 할당한 블록의 포인터
-    if (newptr == NULL)
-        return NULL; // 할당 실패
+    void *newptr = mm_malloc(size);     // 새로 할당한 블록의 포인터
+    if(newptr == NULL)
+        return NULL;
 
-    /* 데이터 복사 */
-    size_t copySize = GET_SIZE(HDRP(ptr)) - DSIZE; // payload만큼 복사
-    if (size < copySize)                           // 기존 사이즈가 새 크기보다 더 크면
-        copySize = size;                           // size로 크기 변경 (기존 메모리 블록보다 작은 크기에 할당하면, 일부 데이터만 복사)
+    size_t copySize = GET_SIZE(HDRP(ptr)) - DSIZE;      // 데이터 영역만 복사
+    if(size < copySize)                                 // 기존 사이즈가 재할당 크기보다 크면
+        copySize = size;                                // 기존 사이즈로 크기 변경 (기존 사이즈가 더 크면, 일부 데이터만 복사)
 
-    memcpy(newptr, ptr, copySize); // 새 블록으로 데이터 복사
-
-    /* 기존 블록 반환 */
-    mm_free(ptr);
-
+    memcpy(newptr, ptr, copySize);                  // 새 블록으로 데이터 복사
+    mm_free(ptr);                                   // 기존 블록 반환
+    
     return newptr;
+
+    /* defualt 코드 */
 
     // void *oldptr = ptr;
     // void *newptr;
